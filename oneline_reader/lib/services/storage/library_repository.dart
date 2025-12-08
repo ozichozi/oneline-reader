@@ -38,6 +38,31 @@ class LibraryRepository {
         .writeJson(_statesFile, states.map((s) => s.toJson()).toList());
   }
 
+  Future<void> deleteBook(String bookId) async {
+    final books = await loadBooks();
+    final updatedBooks = books.where((b) => b.id != bookId).toList();
+    await saveBooks(updatedBooks);
+
+    final states = await loadStates();
+    final updatedStates = states.where((s) => s.bookId != bookId).toList();
+    await saveStates(updatedStates);
+
+    // Delete content file
+    final content = await _contentFile(bookId);
+    if (await content.exists()) {
+      await content.delete();
+    }
+
+    // Delete stored book file if present
+    final removed = books.firstWhereOrNull((b) => b.id == bookId);
+    if (removed != null) {
+      final file = File(removed.filePath);
+      if (await file.exists()) {
+        await file.delete();
+      }
+    }
+  }
+
   Future<void> saveContentUnits(String bookId, List<ContentUnit> units) async {
     final contentFile = await _contentFile(bookId);
     await contentFile.writeAsString(
