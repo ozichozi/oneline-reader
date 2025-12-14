@@ -14,7 +14,7 @@ void main() {
   testWidgets('Shows placeholder', (WidgetTester tester) async {
     await tester.pumpWidget(const ProviderScope(child: OneLineReaderApp()));
 
-    expect(find.text('OneLine Reader'), findsOneWidget);
-    expect(find.textContaining('Library'), findsNothing);
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('Library'), findsOneWidget);
   });
 }

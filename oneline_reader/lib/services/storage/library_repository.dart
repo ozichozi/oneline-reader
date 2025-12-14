@@ -7,6 +7,8 @@ import 'package:uuid/uuid.dart';
 import '../../models/book.dart';
 import '../../models/content_unit.dart';
 import '../../models/reading_state.dart';
+import '../../domain/document_model/document.dart';
+import 'document_storage.dart';
 import 'local_storage.dart';
 
 class LibraryRepository {
@@ -16,6 +18,7 @@ class LibraryRepository {
   static final _uuid = const Uuid();
 
   final LocalStorage _storage = LocalStorage.instance;
+  final DocumentStorage _documentStorage = DocumentStorage();
 
   Future<List<Book>> loadBooks() async {
     final raw = await _storage.readJsonList(_booksFile);
@@ -105,6 +108,16 @@ class LibraryRepository {
       await file.create(recursive: true);
     }
     return file;
+  }
+
+  /// Store canonical document JSON for the given book.
+  Future<void> saveDocument(String bookId, Document document) async {
+    await _documentStorage.saveDocument(bookId, document);
+  }
+
+  /// Load canonical document if present.
+  Future<Document?> loadDocument(String bookId) async {
+    return _documentStorage.loadDocument(bookId);
   }
 
   Book createBook({

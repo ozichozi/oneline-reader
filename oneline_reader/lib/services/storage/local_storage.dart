@@ -25,6 +25,16 @@ class LocalStorage {
     return file;
   }
 
+  /// Returns a file handle inside the app directory without writing to it yet.
+  Future<File> getFile(String relativePath) async {
+    final dir = await getAppDir();
+    final file = File('${dir.path}/$relativePath');
+    if (!await file.exists()) {
+      await file.create(recursive: true);
+    }
+    return file;
+  }
+
   Future<void> writeJson(String relativePath, Object data) async {
     final file = await _file(relativePath);
     await file.writeAsString(jsonEncode(data));
