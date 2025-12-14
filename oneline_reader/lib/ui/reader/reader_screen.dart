@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 
 import 'package:collection/collection.dart';
 import 'package:characters/characters.dart';
@@ -18,6 +18,8 @@ import '../../models/content_unit.dart';
 import '../../models/reading_state.dart';
 import '../../models/styled_text.dart';
 import '../../providers.dart';
+import '../../utils/app_logger.dart';
+import '../../services/storage/local_storage.dart';
 
 class ReaderScreen extends ConsumerStatefulWidget {
   const ReaderScreen({super.key, required this.book});
@@ -32,6 +34,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   late Future<_ReaderData> _loadFuture;
   final SentenceSegmenter _segmenter = SentenceSegmenter();
   final RichTextRenderer _renderer = const RichTextRenderer();
+  final AppLogger _log = const AppLogger('ReaderScreen');
 
   PageController? _pageController;
   List<PageRef> _pages = const [];
@@ -116,15 +119,15 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           _bootstrapState(data);
         }
 
-        if (_document == null && _legacyUnits.isEmpty) {
-          return Scaffold(
-            appBar: AppBar(title: Text(widget.book.title)),
-            body: const Center(child: Text('No content to display')),
-          );
-        }
+    if (_document == null && _legacyUnits.isEmpty) {
+      return Scaffold(
+        appBar: AppBar(title: Text(widget.book.title)),
+        body: const Center(child: Text('No content to display')),
+      );
+    }
 
-        final total = _document != null ? _pages.length : _legacyUnits.length;
-        final controller = _pageController!;
+    final total = _document != null ? _pages.length : _legacyUnits.length;
+    final controller = _pageController!;
 
         return Scaffold(
           backgroundColor: Theme.of(context).colorScheme.surface,
@@ -154,8 +157,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                               onFootnoteTap: (footnoteId) =>
                                   _showFootnote(context, footnoteId),
                               onLinkTap: (url) {
-                                // Placeholder: open URL if desired.
-                                debugPrint('Link tapped: $url');
+                                _log.info('Link tapped', context: {'url': url});
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text('Open link: $url')),
+                                );
                               },
                               footnotes: attachedFootnotes,
                               maxHeight: constraints.maxHeight * 0.75,
@@ -171,11 +176,13 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                     ),
                     if (_controlsVisible) _buildTopBar(context, themeMode),
                     if (_controlsVisible)
-                      _buildBottomBar(
+                    _buildBottomBar(
                         context: context,
                         fontScale: fontScale,
                         totalUnits: total,
                         controller: controller,
+                        showFallback: _document?.meta.nativePdfFallback == true && _document != null,
+                        originalPath: _document?.meta.originalPath,
                       ),
                   ],
                 );
@@ -282,6 +289,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     required double fontScale,
     required int totalUnits,
     required PageController controller,
+    bool showFallback = false,
+    String? originalPath,
   }) {
     final currentIndex = controller.hasClients
         ? (controller.page?.round() ?? controller.initialPage)
@@ -335,6 +344,27 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                   ),
                 ],
               ),
+              if (showFallback && originalPath != null) ...[
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    const Icon(Icons.picture_as_pdf, color: Colors.redAccent),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'PDF shown in placeholder. Open original file: $originalPath',
+                        style: Theme.of(context).textTheme.bodySmall,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () => _openOriginalFile(context, originalPath),
+                      child: const Text('Open'),
+                    ),
+                  ],
+                ),
+              ],
             ],
           ),
         ),
@@ -386,6 +416,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         currentPage.start,
       );
     }
+    _log.info('Switching mode', context: {
+      'from': _mode.name,
+      'to': target.name,
+      'pages': newPages.length,
+      'newIndex': newIndex,
+    });
     setState(() {
       _mode = target;
       _pages = newPages;
@@ -560,7 +596,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   bool _isSentenceEndToken(_Token token) {
     String trimmed = token.text.trimRight();
     while (trimmed.isNotEmpty &&
-        ['"', "'", 'ƒ??', 'ƒ?T', ')', ']', '}'].contains(trimmed.characters.last)) {
+        ['"', '\'', ')', ']', '}'].contains(trimmed.characters.last)) {
       trimmed = trimmed.substring(0, trimmed.length - 1);
     }
     if (trimmed.isEmpty) return false;
@@ -576,7 +612,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   bool _isClosingQuoteText(String text) {
     if (text.isEmpty) return false;
-    const closers = {'"', "'", 'ƒ??', 'ƒ?T', ')', ']', '}'};
+    const closers = {'"', '\'', ')', ']', '}'};
     for (final ch in text.characters) {
       if (!closers.contains(ch)) return false;
     }
@@ -595,6 +631,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     if (doc == null) return;
     final footnote = doc.footnotes[footnoteId];
     if (footnote == null) return;
+    _log.info('Showing footnote', context: {'footnoteId': footnoteId});
     showModalBottomSheet(
       context: context,
       builder: (context) {
@@ -621,6 +658,15 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         );
       },
     );
+  }
+
+  Future<void> _openOriginalFile(BuildContext context, String path) async {
+    final success = await LocalStorage.instance.openExternally(path);
+    if (!success && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Unable to open original file on this device.')),
+      );
+    }
   }
 
   AppThemeMode _mapTheme(ThemeMode mode) {

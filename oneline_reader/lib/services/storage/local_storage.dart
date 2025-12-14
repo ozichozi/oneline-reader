@@ -60,4 +60,31 @@ class LocalStorage {
     await target.parent.create(recursive: true);
     return source.copy(target.path);
   }
+
+  Future<bool> exists(String relativePath) async {
+    final dir = await getAppDir();
+    final file = File('${dir.path}/$relativePath');
+    return file.exists();
+  }
+
+  /// Attempt to open a file with the default handler on the current platform.
+  Future<bool> openExternally(String path) async {
+    try {
+      if (Platform.isWindows) {
+        await Process.start('cmd', ['/c', 'start', '', path]);
+        return true;
+      }
+      if (Platform.isMacOS) {
+        await Process.start('open', [path]);
+        return true;
+      }
+      if (Platform.isLinux) {
+        await Process.start('xdg-open', [path]);
+        return true;
+      }
+    } catch (_) {
+      // ignore
+    }
+    return false;
+  }
 }

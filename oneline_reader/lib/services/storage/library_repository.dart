@@ -120,6 +120,10 @@ class LibraryRepository {
     return _documentStorage.loadDocument(bookId);
   }
 
+  Future<bool> documentExists(String bookId) async {
+    return _storage.exists('documents/$bookId.json');
+  }
+
   Book createBook({
     String? id,
     required String filePath,
