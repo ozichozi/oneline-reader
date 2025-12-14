@@ -11,13 +11,18 @@ class DocumentStorage {
   final LocalStorage _local;
 
   Future<void> saveDocument(String bookId, Document document) async {
-    final file = await _local.getFile('documents/$bookId.json');
+    final dir = await _local.getAppDir();
+    final file = File('${dir.path}/documents/$bookId.json');
+    if (!await file.parent.exists()) {
+      await file.parent.create(recursive: true);
+    }
     final payload = jsonEncode(document.toJson());
     await file.writeAsString(payload);
   }
 
   Future<Document?> loadDocument(String bookId) async {
-    final file = await _local.getFile('documents/$bookId.json');
+    final dir = await _local.getAppDir();
+    final file = File('${dir.path}/documents/$bookId.json');
     if (!await file.exists()) return null;
     final content = await file.readAsString();
     if (content.trim().isEmpty) return null;

@@ -11,22 +11,25 @@ import '../../domain/document_model/document.dart';
 import '../../domain/document_model/footnote.dart';
 import '../../domain/document_model/inline_span.dart';
 import '../../domain/document_model/metadata.dart';
-import '../parser/book_parser.dart';
+import '../../import/import_manager.dart';
 import '../parser/sentence_tokenizer.dart';
 import '../storage/library_repository.dart';
 import '../storage/local_storage.dart';
 import '../../reader/pagination/page_ref.dart';
 import '../../reader/pagination/sentence_segmenter.dart';
+import '../../models/styled_text.dart';
 
 class BookImportService {
   BookImportService({
     LibraryRepository? libraryRepository,
-    BookParser? parser,
-  }) : _repo = libraryRepository ?? LibraryRepository();
+    ImportManager? importManager,
+  })  : _repo = libraryRepository ?? LibraryRepository(),
+        _importManager = importManager ?? ImportManager();
 
   final LibraryRepository _repo;
   final LocalStorage _storage = LocalStorage.instance;
   final _uuid = const Uuid();
+  final ImportManager _importManager;
 
   Future<Book> importFromDevice() async {
     final result = await FilePicker.platform.pickFiles(
@@ -44,16 +47,6 @@ class BookImportService {
     }
     final tempFile = File(filePath);
     final ext = picked.extension?.toLowerCase() ?? '';
-    if (ext == 'pdf') {
-      throw UnsupportedError(
-        'PDF extraction is not ready yet. Please use EPUB/TXT/DOCX for reflowed reading. Native PDF fallback coming soon.',
-      );
-    }
-    if (ext == 'mobi' || ext == 'azw' || ext == 'azw3') {
-      throw UnsupportedError(
-        'MOBI/AZW may be DRM-protected. Please provide a DRM-free EPUB/TXT/DOCX instead.',
-      );
-    }
     final bookId = _uuid.v4();
 
     print('[Import] Starting import for ${picked.name} (${picked.path})');
@@ -67,17 +60,11 @@ class BookImportService {
     final storedFile =
         await _storage.copyIntoApp(tempFile, 'books/${picked.name}');
 
-    final parsed = parsedResult.parsedBook;
+    final document = parsedResult.document;
     final units = parsedResult.units;
-    print('[Import] Parsed ${parsed.paragraphs.length} paragraphs, ${units.length} units');
+    print(
+        '[Import] Parsed document blocks=${document.blocks.length} footnotes=${document.footnotes.length} units=${units.length}');
 
-    // Build canonical document model (docId == bookId for now).
-    final document = _buildDocumentFromParsed(
-      parsed,
-      bookId,
-      storedFile.path,
-      picked.name,
-    );
     await _repo.saveDocument(bookId, document);
     print('[Import] Saved canonical document for $bookId');
 
@@ -91,8 +78,8 @@ class BookImportService {
       id: bookId,
       filePath: storedFile.path,
       originalFileName: picked.name,
-      title: parsed.title,
-      author: parsed.author,
+      title: document.title,
+      author: document.author ?? 'Unknown',
       totalUnits: pages.isNotEmpty ? pages.length : units.length,
     );
 
@@ -109,86 +96,6 @@ class BookImportService {
 
     return book;
   }
-
-  Document _buildDocumentFromParsed(
-    ParsedBook parsed,
-    String bookId,
-    String originalPath,
-    String originalFileName,
-  ) {
-    final blocks = parsed.paragraphs.map(_paragraphToBlock).toList();
-    return Document(
-      docId: bookId,
-      title: parsed.title,
-      author: parsed.author,
-      blocks: blocks,
-      footnotes: const <String, Footnote>{}, // TODO: attach real footnotes.
-      meta: DocumentMeta(
-        source: _mapSource(originalFileName),
-        originalPath: originalPath,
-        originalFileName: originalFileName,
-        importedAt: DateTime.now(),
-      ),
-    );
-  }
-
-  Block _paragraphToBlock(ParagraphInput input) {
-    final spans = <InlineSpanModel>[];
-    int offset = 0;
-    int? headingLevel;
-    for (final seg in input.segments) {
-      final start = offset;
-      final end = offset + seg.text.length;
-      spans.add(
-        StyleSpan(
-          start: start,
-          end: end,
-          attrs: TextStyleAttrs(
-            bold: seg.bold,
-            italic: seg.italic,
-            underline: seg.underline,
-          ),
-        ),
-      );
-      headingLevel ??= seg.headingLevel;
-      offset = end;
-    }
-    if (headingLevel != null) {
-      return HeadingBlock(
-        id: input.id,
-        text: input.text,
-        spans: spans,
-        level: headingLevel!,
-        meta: BlockMeta(headingLevel: headingLevel),
-      );
-    }
-    return ParagraphBlock(
-      id: input.id,
-      text: input.text,
-      spans: spans,
-      meta: const BlockMeta(),
-    );
-  }
-
-  DocumentSourceFormat _mapSource(String fileName) {
-    final ext = fileName.split('.').last.toLowerCase();
-    switch (ext) {
-      case 'txt':
-        return DocumentSourceFormat.txt;
-      case 'epub':
-        return DocumentSourceFormat.epub;
-      case 'docx':
-        return DocumentSourceFormat.docx;
-      case 'pdf':
-        return DocumentSourceFormat.pdf;
-      case 'mobi':
-      case 'azw':
-      case 'azw3':
-        return DocumentSourceFormat.mobi;
-      default:
-        return DocumentSourceFormat.unknown;
-    }
-  }
 }
 
 class _ParseArgs {
@@ -198,17 +105,62 @@ class _ParseArgs {
 }
 
 class _ParsedResult {
-  _ParsedResult(this.parsedBook, this.units);
-  final ParsedBook parsedBook;
+  _ParsedResult(this.document, this.units);
+  final Document document;
   final List<ContentUnit> units;
 }
 
 Future<_ParsedResult> _parseInIsolate(_ParseArgs args) async {
-  final parser = BookParser();
+  final manager = ImportManager();
   final file = File(args.path);
-  final parsed = await parser.parseFile(file);
-  final tokenizer = SentenceTokenizer();
-  final units =
-      tokenizer.buildUnits(bookId: args.bookId, paragraphs: parsed.paragraphs);
-  return _ParsedResult(parsed, units);
+  final document = await manager.importFile(file, docId: args.bookId);
+  final units = _legacyUnitsFromDocument(document, args.bookId);
+  return _ParsedResult(document, units);
+}
+
+List<ContentUnit> _legacyUnitsFromDocument(Document doc, String bookId) {
+  final units = <ContentUnit>[];
+  int idx = 0;
+  final segmenter = SentenceSegmenter();
+  for (final block in doc.blocks) {
+    if (block.type == BlockType.paragraph || block.type == BlockType.heading) {
+      final ranges = segmenter.split(block.text);
+      final headingLevel =
+          block is HeadingBlock ? block.level : block.meta.headingLevel;
+      final slices = ranges.isNotEmpty
+          ? ranges
+          : [TextRange(0, block.text.length)];
+      for (final r in slices) {
+        final text = block.text.substring(r.start, r.end);
+        units.add(
+          ContentUnit(
+            id: '${bookId}_$idx',
+            bookId: bookId,
+            index: idx,
+            type: ContentUnitType.sentence,
+            segments: [
+              StyledSegment(
+                text: text,
+                headingLevel: headingLevel,
+              ),
+            ],
+            paragraphId: block.id,
+          ),
+        );
+        idx++;
+      }
+      units.add(
+        ContentUnit(
+          id: '${bookId}_$idx',
+          bookId: bookId,
+          index: idx,
+          type: ContentUnitType.emptyParagraphBreak,
+          segments: const [],
+          paragraphId: block.id,
+        ),
+      );
+      idx++;
+    }
+  }
+  return units;
 }
