@@ -145,6 +145,9 @@ class LibraryRepository {
     return ReadingState(
       bookId: bookId,
       currentUnitIndex: 0,
+      blockId: null,
+      charOffset: 0,
+      pageMode: ReadingPageMode.sentence,
       theme: AppThemeMode.system,
       fontScale: 1.0,
       lastOpenedAt: DateTime.now(),

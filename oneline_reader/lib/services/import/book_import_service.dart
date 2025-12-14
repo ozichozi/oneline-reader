@@ -15,6 +15,8 @@ import '../parser/book_parser.dart';
 import '../parser/sentence_tokenizer.dart';
 import '../storage/library_repository.dart';
 import '../storage/local_storage.dart';
+import '../../reader/pagination/page_ref.dart';
+import '../../reader/pagination/sentence_segmenter.dart';
 
 class BookImportService {
   BookImportService({
@@ -29,7 +31,7 @@ class BookImportService {
   Future<Book> importFromDevice() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
-      allowedExtensions: const ['txt', 'epub', 'docx'],
+      allowedExtensions: const ['txt', 'epub', 'docx', 'pdf', 'mobi', 'azw', 'azw3'],
       withData: false,
     );
     if (result == null || result.files.isEmpty) {
@@ -41,6 +43,17 @@ class BookImportService {
       throw Exception('Unable to read selected file');
     }
     final tempFile = File(filePath);
+    final ext = picked.extension?.toLowerCase() ?? '';
+    if (ext == 'pdf') {
+      throw UnsupportedError(
+        'PDF extraction is not ready yet. Please use EPUB/TXT/DOCX for reflowed reading. Native PDF fallback coming soon.',
+      );
+    }
+    if (ext == 'mobi' || ext == 'azw' || ext == 'azw3') {
+      throw UnsupportedError(
+        'MOBI/AZW may be DRM-protected. Please provide a DRM-free EPUB/TXT/DOCX instead.',
+      );
+    }
     final bookId = _uuid.v4();
 
     print('[Import] Starting import for ${picked.name} (${picked.path})');
@@ -68,13 +81,19 @@ class BookImportService {
     await _repo.saveDocument(bookId, document);
     print('[Import] Saved canonical document for $bookId');
 
+    final pages = paginateDocument(
+      document: document,
+      segmenter: SentenceSegmenter(),
+      mode: PageMode.sentence,
+    );
+
     final book = _repo.createBook(
       id: bookId,
       filePath: storedFile.path,
       originalFileName: picked.name,
       title: parsed.title,
       author: parsed.author,
-      totalUnits: units.length,
+      totalUnits: pages.isNotEmpty ? pages.length : units.length,
     );
 
     await _repo.saveContentUnits(bookId, units);
