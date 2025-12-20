@@ -1,18 +1,9 @@
 import 'dart:async';
 
-import 'package:collection/collection.dart';
-import 'package:characters/characters.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:google_fonts/google_fonts.dart';
 
-import '../../domain/document_model/block.dart';
-import '../../domain/document_model/document.dart';
-import '../../domain/document_model/footnote.dart';
-import '../../domain/document_model/inline_span.dart';
-import '../../reader/pagination/page_ref.dart';
-import '../../reader/pagination/sentence_segmenter.dart';
-import '../../reader/rendering/rich_text_renderer.dart';
 import '../../models/book.dart';
 import '../../models/content_unit.dart';
 import '../../models/reading_state.dart';
@@ -30,15 +21,8 @@ class ReaderScreen extends ConsumerStatefulWidget {
 
 class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   late Future<_ReaderData> _loadFuture;
-  final SentenceSegmenter _segmenter = SentenceSegmenter();
-  final RichTextRenderer _renderer = const RichTextRenderer();
-
   PageController? _pageController;
-  List<PageRef> _pages = const [];
-  List<ContentUnit> _legacyUnits = const [];
-  PageMode _mode = PageMode.sentence;
-  Document? _document;
-
+  List<ContentUnit> _displayUnits = const [];
   bool _controlsVisible = true;
   Timer? _hideTimer;
 
@@ -57,30 +41,13 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   Future<_ReaderData> _loadData() async {
     final repo = ref.read(libraryRepositoryProvider);
-    final doc = await repo.loadDocument(widget.book.id);
-    final units = doc == null ? await repo.loadContentUnits(widget.book.id) : <ContentUnit>[];
+    final units = await repo.loadContentUnits(widget.book.id);
     final states = await repo.loadStates();
     final existing = states.firstWhere(
       (s) => s.bookId == widget.book.id,
       orElse: () => repo.createInitialState(widget.book.id),
     );
-    final mode = existing.pageMode == ReadingPageMode.paragraph
-        ? PageMode.paragraph
-        : PageMode.sentence;
-    final pages = doc != null
-        ? paginateDocument(
-            document: doc,
-            segmenter: _segmenter,
-            mode: mode,
-          )
-        : <PageRef>[];
-    return _ReaderData(
-      document: doc,
-      pages: pages,
-      legacyUnits: units,
-      state: existing,
-      mode: mode,
-    );
+    return _ReaderData(units: units, state: existing);
   }
 
   void _startHideTimer() {
@@ -112,25 +79,35 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           return const Scaffold(body: Center(child: CircularProgressIndicator()));
         }
         final data = snapshot.data!;
-        if (_pageController == null) {
-          _bootstrapState(data);
-        }
-
-        if (_document == null && _legacyUnits.isEmpty) {
+        if (data.units.isEmpty) {
           return Scaffold(
             appBar: AppBar(title: Text(widget.book.title)),
             body: const Center(child: Text('No content to display')),
           );
         }
 
-        final total = _document != null ? _pages.length : _legacyUnits.length;
-        final controller = _pageController!;
-
         return Scaffold(
           backgroundColor: Theme.of(context).colorScheme.surface,
           body: SafeArea(
             child: LayoutBuilder(
               builder: (context, constraints) {
+                if (_displayUnits.isEmpty) {
+                  final allowedHeight = constraints.maxHeight * 0.6;
+                  _displayUnits = _expandUnits(
+                    data.units,
+                    fontScale,
+                    constraints.maxWidth - 48, // padding
+                    allowedHeight - 24, // breathing room inside 60% box
+                  );
+                  final total = _displayUnits.length;
+                  final initial =
+                      data.state.currentUnitIndex.clamp(0, total - 1);
+                  _pageController ??= PageController(initialPage: initial);
+                }
+                final controller =
+                    _pageController ?? PageController(initialPage: 0);
+                final total = _displayUnits.length;
+
                 return Stack(
                   children: [
                     GestureDetector(
@@ -142,27 +119,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                         physics: const PageScrollPhysics(),
                         itemCount: total,
                         onPageChanged: (index) =>
-                            _onPageChanged(index, fontScale, themeMode),
+                            _onPageChanged(index, total, fontScale, themeMode),
                         itemBuilder: (context, index) {
-                          if (_document != null) {
-                            final page = _pages[index];
-                            final attachedFootnotes = _footnotesFor(page);
-                            return _DocPage(
-                              page: page,
-                              mode: _mode,
-                              renderer: _renderer,
-                              onFootnoteTap: (footnoteId) =>
-                                  _showFootnote(context, footnoteId),
-                              onLinkTap: (url) {
-                                // Placeholder: open URL if desired.
-                                debugPrint('Link tapped: $url');
-                              },
-                              footnotes: attachedFootnotes,
-                              maxHeight: constraints.maxHeight * 0.75,
-                            );
-                          }
-                          return _LegacyReaderPage(
-                            unit: _legacyUnits[index],
+                          return _ReaderPage(
+                            unit: _displayUnits[index],
                             fontScale: fontScale,
                             maxHeight: constraints.maxHeight * 0.6,
                           );
@@ -172,11 +132,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                     if (_controlsVisible) _buildTopBar(context, themeMode),
                     if (_controlsVisible)
                       _buildBottomBar(
-                        context: context,
-                        fontScale: fontScale,
-                        totalUnits: total,
-                        controller: controller,
-                      ),
+                          context, fontScale, total, controller),
                   ],
                 );
               },
@@ -185,25 +141,6 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         );
       },
     );
-  }
-
-  void _bootstrapState(_ReaderData data) {
-    _document = data.document;
-    _mode = data.mode;
-    if (_document != null) {
-      _pages = data.pages ?? const [];
-      final initial = _initialDocPageIndex(data.state, _pages);
-      _pageController = PageController(initialPage: initial);
-    } else {
-      _legacyUnits = _expandUnits(
-        data.legacyUnits,
-        data.state.fontScale,
-        400,
-        600,
-      );
-      final initial = data.state.currentUnitIndex.clamp(0, _legacyUnits.length - 1);
-      _pageController = PageController(initialPage: initial);
-    }
   }
 
   Widget _buildTopBar(BuildContext context, ThemeMode themeMode) {
@@ -231,28 +168,6 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
               ),
-              if (_document != null)
-                ToggleButtons(
-                  constraints: const BoxConstraints(minHeight: 36, minWidth: 60),
-                  isSelected: [
-                    _mode == PageMode.sentence,
-                    _mode == PageMode.paragraph
-                  ],
-                  onPressed: (idx) {
-                    final target = idx == 0 ? PageMode.sentence : PageMode.paragraph;
-                    _switchMode(target);
-                  },
-                  children: const [
-                    Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 8),
-                      child: Text('Sentence'),
-                    ),
-                    Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 8),
-                      child: Text('Paragraph'),
-                    ),
-                  ],
-                ),
               IconButton(
                 icon: Icon(
                   themeMode == ThemeMode.dark
@@ -277,19 +192,13 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     );
   }
 
-  Widget _buildBottomBar({
-    required BuildContext context,
-    required double fontScale,
-    required int totalUnits,
-    required PageController controller,
-  }) {
+  Widget _buildBottomBar(BuildContext context, double fontScale, int totalUnits,
+      PageController controller) {
     final currentIndex = controller.hasClients
         ? (controller.page?.round() ?? controller.initialPage)
         : controller.initialPage;
     final progress =
-        ((currentIndex + 1) / (totalUnits == 0 ? 1 : totalUnits) * 100)
-            .clamp(0, 100)
-            .toStringAsFixed(0);
+        ((currentIndex + 1) / totalUnits * 100).clamp(0, 100).toStringAsFixed(0);
 
     return Positioned(
       left: 0,
@@ -309,7 +218,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                 children: [
                   Expanded(
                     child: LinearProgressIndicator(
-                      value: (currentIndex + 1) / (totalUnits == 0 ? 1 : totalUnits),
+                      value: (currentIndex + 1) / totalUnits,
                       minHeight: 6,
                     ),
                   ),
@@ -343,74 +252,27 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   }
 
   Future<void> _onPageChanged(
-      int index, double fontScale, ThemeMode themeMode) async {
+      int index, int totalUnits, double fontScale, ThemeMode themeMode) async {
     _startHideTimer();
-    final state = _document != null
-        ? ReadingState(
-            bookId: widget.book.id,
-            currentUnitIndex: index,
-            blockId: _pages[index].blockId,
-            charOffset: _pages[index].start,
-            pageMode: _mode == PageMode.paragraph
-                ? ReadingPageMode.paragraph
-                : ReadingPageMode.sentence,
-            theme: _mapTheme(themeMode),
-            fontScale: fontScale,
-            lastOpenedAt: DateTime.now(),
-          )
-        : ReadingState(
-            bookId: widget.book.id,
-            currentUnitIndex: index,
-            theme: _mapTheme(themeMode),
-            fontScale: fontScale,
-            lastOpenedAt: DateTime.now(),
-          );
+    final state = ReadingState(
+      bookId: widget.book.id,
+      currentUnitIndex: index,
+      theme: _mapTheme(themeMode),
+      fontScale: fontScale,
+      lastOpenedAt: DateTime.now(),
+    );
     await ref.read(readingStatesProvider.notifier).upsert(state);
   }
 
-  void _switchMode(PageMode target) {
-    if (_document == null || target == _mode) return;
-    final currentIndex = _pageController?.page?.round() ?? 0;
-    final currentPage =
-        currentIndex >= 0 && currentIndex < _pages.length ? _pages[currentIndex] : null;
-    final newPages = paginateDocument(
-      document: _document!,
-      segmenter: _segmenter,
-      mode: target,
-    );
-    int newIndex = 0;
-    if (currentPage != null) {
-      newIndex = _findPageIndex(
-        newPages,
-        currentPage.blockId,
-        currentPage.start,
-      );
+  AppThemeMode _mapTheme(ThemeMode mode) {
+    switch (mode) {
+      case ThemeMode.light:
+        return AppThemeMode.light;
+      case ThemeMode.dark:
+        return AppThemeMode.dark;
+      case ThemeMode.system:
+        return AppThemeMode.system;
     }
-    setState(() {
-      _mode = target;
-      _pages = newPages;
-      _pageController = PageController(initialPage: newIndex);
-    });
-  }
-
-  int _initialDocPageIndex(ReadingState state, List<PageRef> pages) {
-    if (pages.isEmpty) return 0;
-    if (state.blockId != null) {
-      final idx = _findPageIndex(
-        pages,
-        state.blockId!,
-        state.charOffset ?? 0,
-      );
-      if (idx >= 0) return idx;
-    }
-    return state.currentUnitIndex.clamp(0, pages.length - 1);
-  }
-
-  int _findPageIndex(List<PageRef> pages, String blockId, int charOffset) {
-    final idx = pages.indexWhere(
-      (p) => p.blockId == blockId && charOffset >= p.start && charOffset < p.end,
-    );
-    return idx >= 0 ? idx : 0;
   }
 
   List<ContentUnit> _expandUnits(
@@ -446,9 +308,9 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     if (tokens.isEmpty) return [unit];
 
     // Rough capacity estimate based on area and font scale; keeps compute light to avoid crashes.
-    final approxCharsPerLine =
-        (maxWidth / (10 * fontScale)).clamp(20, 120).toInt();
-    final approxLines = (maxHeight / (20 * fontScale)).clamp(4, 40).toInt();
+    final approxCharsPerLine = (maxWidth / (10 * fontScale)).clamp(20, 120).toInt();
+    final approxLines =
+        (maxHeight / (20 * fontScale)).clamp(4, 40).toInt();
     final maxChars = (approxCharsPerLine * approxLines).clamp(80, 1200);
 
     final pages = <List<_Token>>[];
@@ -471,6 +333,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       final isEnd = _isSentenceEndToken(token);
       final hasMore = i < tokens.length - 1;
 
+      // If adding this token would exceed capacity, break page.
       if (currentChars + tokenLen > maxChars && current.isNotEmpty) {
         pushCurrent(addEllipsis: true, style: _styleFor(current.last));
       }
@@ -510,6 +373,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       }
     }
 
+    // Merge closing-quote tokens into the previous token to keep sentence endings intact.
     final tokens = <_Token>[];
     for (final token in rawTokens) {
       final trimmed = token.text.trim();
@@ -560,7 +424,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   bool _isSentenceEndToken(_Token token) {
     String trimmed = token.text.trimRight();
     while (trimmed.isNotEmpty &&
-        ['"', "'", 'ƒ??', 'ƒ?T', ')', ']', '}'].contains(trimmed.characters.last)) {
+        ['"', "'", '”', '’', ')', ']', '}'].contains(trimmed.characters.last)) {
       trimmed = trimmed.substring(0, trimmed.length - 1);
     }
     if (trimmed.isEmpty) return false;
@@ -576,129 +440,16 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   bool _isClosingQuoteText(String text) {
     if (text.isEmpty) return false;
-    const closers = {'"', "'", 'ƒ??', 'ƒ?T', ')', ']', '}'};
+    const closers = {'"', "'", '”', '’', ')', ']', '}'};
     for (final ch in text.characters) {
       if (!closers.contains(ch)) return false;
     }
     return true;
   }
-
-  List<Footnote> _footnotesFor(PageRef page) {
-    final doc = _document;
-    if (doc == null) return const [];
-    final ids = page.spans.whereType<FootnoteRefSpan>().map((s) => s.footnoteId).toSet();
-    return ids.map((id) => doc.footnotes[id]).whereNotNull().toList();
-  }
-
-  void _showFootnote(BuildContext context, String footnoteId) {
-    final doc = _document;
-    if (doc == null) return;
-    final footnote = doc.footnotes[footnoteId];
-    if (footnote == null) return;
-    showModalBottomSheet(
-      context: context,
-      builder: (context) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: ListView.builder(
-              itemCount: footnote.blocks.length,
-              itemBuilder: (context, index) {
-                final block = footnote.blocks[index];
-                final span = _renderer.buildSpanTree(
-                  text: block.text,
-                  spans: block.spans,
-                  onFootnoteTap: (_) {},
-                  onLinkTap: (_) {},
-                );
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: RichText(text: span),
-                );
-              },
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  AppThemeMode _mapTheme(ThemeMode mode) {
-    switch (mode) {
-      case ThemeMode.light:
-        return AppThemeMode.light;
-      case ThemeMode.dark:
-        return AppThemeMode.dark;
-      case ThemeMode.system:
-        return AppThemeMode.system;
-    }
-  }
 }
 
-class _DocPage extends StatelessWidget {
-  const _DocPage({
-    required this.page,
-    required this.mode,
-    required this.renderer,
-    required this.onFootnoteTap,
-    required this.onLinkTap,
-    required this.footnotes,
-    required this.maxHeight,
-  });
-
-  final PageRef page;
-  final PageMode mode;
-  final RichTextRenderer renderer;
-  final FootnoteTap onFootnoteTap;
-  final LinkTap onLinkTap;
-  final List<Footnote> footnotes;
-  final double maxHeight;
-
-  @override
-  Widget build(BuildContext context) {
-    final spanTree = renderer.buildSpanTree(
-      text: page.text,
-      spans: page.spans,
-      onFootnoteTap: onFootnoteTap,
-      onLinkTap: onLinkTap,
-    );
-    return Center(
-      child: SizedBox(
-        height: maxHeight,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              RichText(
-                textAlign: TextAlign.center,
-                text: spanTree,
-              ),
-              if (footnotes.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                Wrap(
-                  alignment: WrapAlignment.center,
-                  spacing: 8,
-                  children: footnotes
-                      .map(
-                        (f) => ActionChip(
-                          label: Text('Footnote ${f.label}'),
-                          onPressed: () => onFootnoteTap(f.id),
-                        ),
-                      )
-                      .toList(),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _LegacyReaderPage extends StatelessWidget {
-  const _LegacyReaderPage({
+class _ReaderPage extends StatelessWidget {
+  const _ReaderPage({
     required this.unit,
     required this.fontScale,
     required this.maxHeight,
@@ -721,7 +472,7 @@ class _LegacyReaderPage extends StatelessWidget {
       final fontSize = baseSize * headingMultiplier;
       return TextSpan(
         text: s.text,
-        style: TextStyle(
+        style: GoogleFonts.lora(
           fontSize: fontSize,
           fontWeight: s.bold ? FontWeight.w700 : FontWeight.w400,
           fontStyle: s.italic ? FontStyle.italic : FontStyle.normal,
@@ -757,19 +508,10 @@ class _LegacyReaderPage extends StatelessWidget {
 }
 
 class _ReaderData {
-  final Document? document;
-  final List<PageRef>? pages;
-  final List<ContentUnit> legacyUnits;
+  final List<ContentUnit> units;
   final ReadingState state;
-  final PageMode mode;
 
-  const _ReaderData({
-    required this.document,
-    required this.pages,
-    required this.legacyUnits,
-    required this.state,
-    required this.mode,
-  });
+  _ReaderData({required this.units, required this.state});
 }
 
 extension on ContentUnit {
