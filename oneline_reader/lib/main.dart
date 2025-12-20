@@ -15,7 +15,7 @@ class OneLineReaderApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final themeMode = ref.watch(themeControllerProvider);
-    final baseTextTheme = GoogleFonts.loraTextTheme();
+    final baseTextTheme = GoogleFonts.ebGaramondTextTheme();
     return MaterialApp(
       title: 'OneLine Reader',
       themeMode: themeMode,

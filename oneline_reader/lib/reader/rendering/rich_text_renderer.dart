@@ -77,7 +77,7 @@ class RichTextRenderer {
     return TextSpan(children: children, style: _baseStyle());
   }
 
-  TextStyle _baseStyle() => GoogleFonts.lora(
+  TextStyle _baseStyle() => GoogleFonts.ebGaramond(
         fontSize: 18,
         height: 1.4,
       );

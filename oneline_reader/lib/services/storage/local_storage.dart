@@ -60,4 +60,25 @@ class LocalStorage {
     await target.parent.create(recursive: true);
     return source.copy(target.path);
   }
+
+  /// Best-effort attempt to open a file externally. Returns true on success.
+  Future<bool> openExternally(String path) async {
+    try {
+      if (Platform.isMacOS) {
+        final result = await Process.run('open', [path]);
+        return result.exitCode == 0;
+      }
+      if (Platform.isWindows) {
+        final result = await Process.run('cmd', ['/c', 'start', '', path]);
+        return result.exitCode == 0;
+      }
+      if (Platform.isLinux) {
+        final result = await Process.run('xdg-open', [path]);
+        return result.exitCode == 0;
+      }
+    } catch (_) {
+      // swallow and return false
+    }
+    return false;
+  }
 }

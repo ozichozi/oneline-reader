@@ -4,9 +4,11 @@ import 'dart:io';
 import 'package:collection/collection.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../domain/document_model/document.dart';
 import '../../models/book.dart';
 import '../../models/content_unit.dart';
 import '../../models/reading_state.dart';
+import 'document_storage.dart';
 import 'local_storage.dart';
 
 class LibraryRepository {
@@ -16,6 +18,7 @@ class LibraryRepository {
   static final _uuid = const Uuid();
 
   final LocalStorage _storage = LocalStorage.instance;
+  final DocumentStorage _documents = DocumentStorage();
 
   Future<List<Book>> loadBooks() async {
     final raw = await _storage.readJsonList(_booksFile);
@@ -36,6 +39,14 @@ class LibraryRepository {
   Future<void> saveStates(List<ReadingState> states) async {
     await _storage
         .writeJson(_statesFile, states.map((s) => s.toJson()).toList());
+  }
+
+  Future<void> saveDocument(String bookId, Document document) async {
+    await _documents.saveDocument(bookId, document);
+  }
+
+  Future<Document?> loadDocument(String bookId) async {
+    return _documents.loadDocument(bookId);
   }
 
   Future<void> deleteBook(String bookId) async {

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/book.dart';
 import '../../models/reading_state.dart';
 import '../../providers.dart';
+import '../../services/import/book_import_service.dart';
 import '../reader/reader_screen.dart';
 
 class LibraryScreen extends ConsumerStatefulWidget {
@@ -15,6 +16,7 @@ class LibraryScreen extends ConsumerStatefulWidget {
 
 class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   String? _openTileId;
+  _ImportingBook? _importingBook;
 
   void _setOpenTile(String? id) {
     setState(() {
@@ -56,7 +58,9 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
           onTap: () => _setOpenTile(null),
           child: booksAsync.when(
             data: (books) {
-              if (books.isEmpty) {
+              final states = statesAsync.valueOrNull ?? {};
+              final hasImporting = _importingBook != null;
+              if (books.isEmpty && !hasImporting) {
                 return ListView(
                   padding: const EdgeInsets.symmetric(vertical: 64),
                   children: const [
@@ -69,12 +73,16 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                   ],
                 );
               }
-              final states = statesAsync.valueOrNull ?? {};
+              final itemCount = books.length + (hasImporting ? 1 : 0);
               return ListView.separated(
-                itemCount: books.length,
+                itemCount: itemCount,
                 separatorBuilder: (_, __) => const Divider(height: 1),
                 itemBuilder: (context, index) {
-                  final book = books[index];
+                  if (hasImporting && index == 0) {
+                    return _ImportingTile(preview: _importingBook!);
+                  }
+                  final adjustedIndex = hasImporting ? index - 1 : index;
+                  final book = books[adjustedIndex];
                   final state = states[book.id];
                   final progress = _progressPercent(book, state);
                   final isOpen = _openTileId == book.id;
@@ -111,7 +119,17 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
       messenger.showSnackBar(
         const SnackBar(content: Text('Importing book...')),
       );
-      await ref.read(bookImportServiceProvider).importFromDevice();
+      await ref.read(bookImportServiceProvider).importFromDevice(
+            onPreview: (preview) {
+              if (!mounted) return;
+              setState(() {
+                _importingBook = _ImportingBook(
+                  title: preview.title,
+                  author: preview.author,
+                );
+              });
+            },
+          );
       await ref.read(booksProvider.notifier).refresh();
       await ref.read(readingStatesProvider.notifier).refresh();
       messenger.showSnackBar(
@@ -121,6 +139,12 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
       messenger.showSnackBar(
         SnackBar(content: Text('Failed to import: $e')),
       );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _importingBook = null;
+        });
+      }
     }
   }
 
@@ -149,6 +173,44 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   }
 }
 
+class _ImportingBook {
+  final String title;
+  final String author;
+
+  const _ImportingBook({
+    required this.title,
+    required this.author,
+  });
+}
+
+class _ImportingTile extends StatelessWidget {
+  const _ImportingTile({required this.preview});
+
+  final _ImportingBook preview;
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: ListTile(
+        title: Text(preview.title),
+        subtitle: Text(preview.author),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: const [
+            SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            SizedBox(width: 8),
+            Text('Loading'),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _BookTile extends StatefulWidget {
   const _BookTile({
     required this.book,
@@ -171,7 +233,7 @@ class _BookTile extends StatefulWidget {
 }
 
 class _BookTileState extends State<_BookTile> {
-  static const double _actionWidth = 96;
+  static const double _actionWidth = 72;
   double _dragX = 0;
 
   void _handleDragUpdate(DragUpdateDetails details) {
@@ -203,13 +265,10 @@ class _BookTileState extends State<_BookTile> {
                   .withValues(alpha: 0.1),
               padding: const EdgeInsets.symmetric(horizontal: 16),
               alignment: Alignment.centerRight,
-              child: TextButton.icon(
+              child: IconButton(
                 onPressed: widget.onDelete,
                 icon: const Icon(Icons.delete, color: Colors.redAccent),
-                label: const Text(
-                  'Delete',
-                  style: TextStyle(color: Colors.redAccent),
-                ),
+                tooltip: 'Delete',
               ),
             ),
           ),

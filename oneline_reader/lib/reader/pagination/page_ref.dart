@@ -1,5 +1,3 @@
-import 'package:collection/collection.dart';
-
 import '../../domain/document_model/block.dart';
 import '../../domain/document_model/document.dart';
 import '../../domain/document_model/inline_span.dart';
@@ -42,7 +40,9 @@ List<PageRef> paginateDocument({
         continue;
       }
       final ranges = segmenter.split(block.text);
-      final bounded = ranges.isNotEmpty ? ranges : [TextRange(0, block.text.length)];
+      final bounded = ranges.isNotEmpty
+          ? ranges
+          : [TextRange(0, block.text.length)];
       for (final range in bounded) {
         final slices = _chunkRange(block, range, maxSentenceLength);
         for (final chunk in slices) {
