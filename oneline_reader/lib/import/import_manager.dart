@@ -5,7 +5,6 @@ import 'package:archive/archive_io.dart';
 import 'package:collection/collection.dart';
 import 'package:epubx/epubx.dart';
 import 'package:html/parser.dart' as html_parser;
-import 'package:html/dom.dart' as dom;
 import 'package:xml/xml.dart';
 
 import '../domain/document_model/block.dart';
@@ -13,7 +12,6 @@ import '../domain/document_model/document.dart';
 import '../domain/document_model/footnote.dart';
 import '../domain/document_model/inline_span.dart';
 import '../domain/document_model/metadata.dart';
-import '../utils/app_logger.dart';
 
 abstract class DocumentImporter {
   bool supports(String extension);
@@ -27,7 +25,7 @@ class ImportManager {
               TxtImporter(),
               EpubImporter(),
               DocxImporter(),
-              PdfImporter(),
+              PdfUnsupportedImporter(),
               MobiUnsupportedImporter(),
             ];
 
@@ -85,15 +83,12 @@ class TxtImporter implements DocumentImporter {
 }
 
 class EpubImporter implements DocumentImporter {
-  final AppLogger _log = const AppLogger('EpubImporter');
-
   @override
   bool supports(String extension) => extension == 'epub';
 
   @override
   Future<Document> importFile(File file, {required String docId}) async {
     final bytes = await file.readAsBytes();
-    _log.info('Reading epub bytes', context: {'path': file.path});
     final book = await EpubReader.readBook(bytes);
     final title = book.Title?.trim().isNotEmpty == true
         ? book.Title!
@@ -110,7 +105,14 @@ class EpubImporter implements DocumentImporter {
       final document = html_parser.parse(html);
       final body = document.body;
       if (body == null) return;
-      final anchorTargets = _extractAnchorTargets(document);
+      // Build map of potential footnote targets by id.
+      final footnoteTargets = <String, String>{};
+      for (final el in document.querySelectorAll('[id]')) {
+        final id = el.id;
+        if (id.isNotEmpty) {
+          footnoteTargets[id] = el.text.trim();
+        }
+      }
       for (final element in body.children) {
         final local = element.localName ?? '';
         final headingLevel = _headingLevel(local);
@@ -133,23 +135,28 @@ class EpubImporter implements DocumentImporter {
               footnoteId: id,
               label: label,
             ));
-            final content = anchorTargets[id];
+            final content = footnoteTargets[id];
             if (content != null && !footnotes.containsKey(id)) {
-              footnotes[id] = _footnoteFromContent(id, label, content, element.id);
+              footnotes[id] = Footnote(
+                id: id,
+                label: label,
+                blocks: [
+                  ParagraphBlock(
+                    id: 'fn_$id',
+                    text: content,
+                    spans: [
+                      StyleSpan(
+                        start: 0,
+                        end: content.length,
+                        attrs: const TextStyleAttrs(),
+                      )
+                    ],
+                    meta: const BlockMeta(),
+                  )
+                ],
+                meta: FootnoteMeta(sourceBlockId: element.id),
+              );
             }
-          } else if (href != null && href.isNotEmpty) {
-            spans.add(
-              LinkSpan(
-                start: start,
-                end: end,
-                url: href,
-                attrs: TextStyleAttrs(
-                  bold: _isBold(node.parent?.localName),
-                  italic: _isItalic(node.parent?.localName),
-                  underline: true,
-                ),
-              ),
-            );
           } else {
             spans.add(
               StyleSpan(
@@ -215,40 +222,6 @@ class EpubImporter implements DocumentImporter {
     );
   }
 
-  Map<String, String> _extractAnchorTargets(dom.Document document) {
-    final targets = <String, String>{};
-    for (final el in document.querySelectorAll('[id]')) {
-      final id = el.id;
-      if (id.isNotEmpty) {
-        targets[id] = el.text.trim();
-      }
-    }
-    return targets;
-  }
-
-  Footnote _footnoteFromContent(
-      String id, String label, String content, String? sourceBlockId) {
-    return Footnote(
-      id: id,
-      label: label,
-      blocks: [
-        ParagraphBlock(
-          id: 'fn_$id',
-          text: content,
-          spans: [
-            StyleSpan(
-              start: 0,
-              end: content.length,
-              attrs: const TextStyleAttrs(),
-            )
-          ],
-          meta: const BlockMeta(),
-        )
-      ],
-      meta: FootnoteMeta(sourceBlockId: sourceBlockId),
-    );
-  }
-
   int? _headingLevel(String? tag) {
     if (tag == null) return null;
     if (RegExp(r'h[1-6]').hasMatch(tag)) {
@@ -263,8 +236,6 @@ class EpubImporter implements DocumentImporter {
 }
 
 class DocxImporter implements DocumentImporter {
-  final AppLogger _log = const AppLogger('DocxImporter');
-
   @override
   bool supports(String extension) => extension == 'docx';
 
@@ -274,10 +245,6 @@ class DocxImporter implements DocumentImporter {
     final archive = ZipDecoder().decodeBytes(bytes);
     final xmlFile =
         archive.files.firstWhereOrNull((f) => f.name == 'word/document.xml');
-    final footnoteFile =
-        archive.files.firstWhereOrNull((f) => f.name == 'word/footnotes.xml');
-    final footnoteMap =
-        footnoteFile != null ? _parseFootnotes(utf8.decode(footnoteFile.content as List<int>)) : {};
     final title = file.uri.pathSegments.last;
     if (xmlFile == null) {
       return _emptyDoc(docId, title, file.path);
@@ -297,25 +264,6 @@ class DocxImporter implements DocumentImporter {
       int offset = 0;
       final spans = <InlineSpanModel>[];
       for (final r in runs) {
-        final footnoteRef = r.findElements('w:footnoteReference').firstOrNull;
-        if (footnoteRef != null) {
-          final idAttr = footnoteRef.getAttribute('w:id');
-          if (idAttr != null && footnoteMap.containsKey(idAttr)) {
-            final start = offset;
-            final end = offset + 1;
-            spans.add(
-              FootnoteRefSpan(
-                start: start,
-                end: end,
-                footnoteId: idAttr,
-                label: footnoteMap[idAttr]?.label ?? idAttr,
-              ),
-            );
-            textBuffer.write('[$idAttr]');
-            offset = end;
-            continue;
-          }
-        }
         final textNode = r.findElements('w:t').firstOrNull?.innerText ?? '';
         if (textNode.isEmpty) continue;
         final rPr = r.findElements('w:rPr').firstOrNull;
@@ -369,7 +317,7 @@ class DocxImporter implements DocumentImporter {
       title: title,
       author: 'Unknown',
       blocks: blocks,
-      footnotes: footnoteMap.map((k, v) => MapEntry(k, v)),
+      footnotes: const {},
       meta: DocumentMeta(
         source: DocumentSourceFormat.docx,
         originalPath: file.path,
@@ -403,81 +351,16 @@ class DocxImporter implements DocumentImporter {
       ),
     );
   }
-
-  Map<String, Footnote> _parseFootnotes(String xml) {
-    final doc = XmlDocument.parse(xml);
-    final notes = <String, Footnote>{};
-    for (final fn in doc.findAllElements('w:footnote')) {
-      final id = fn.getAttribute('w:id');
-      if (id == null) continue;
-      final textBuffer = StringBuffer();
-      for (final p in fn.findAllElements('w:p')) {
-        for (final t in p.findAllElements('w:t')) {
-          textBuffer.write(t.innerText);
-        }
-        textBuffer.write('\n');
-      }
-      final text = textBuffer.toString().trim();
-      if (text.isEmpty) continue;
-      notes[id] = Footnote(
-        id: id,
-        label: id,
-        blocks: [
-          ParagraphBlock(
-            id: 'fn_$id',
-            text: text,
-            spans: [
-              StyleSpan(
-                start: 0,
-                end: text.length,
-                attrs: const TextStyleAttrs(),
-              )
-            ],
-            meta: const BlockMeta(),
-          )
-        ],
-        meta: const FootnoteMeta(),
-      );
-    }
-    return notes;
-  }
 }
 
-class PdfImporter implements DocumentImporter {
+class PdfUnsupportedImporter implements DocumentImporter {
   @override
   bool supports(String extension) => extension == 'pdf';
 
   @override
-  Future<Document> importFile(File file, {required String docId}) async {
-    final placeholder = ParagraphBlock(
-      id: 'pdf_placeholder',
-      text:
-          'PDF extraction is not supported in reflow mode yet. Please open the original PDF to view this book.',
-      spans: [
-        StyleSpan(
-          start: 0,
-          end:
-              'PDF extraction is not supported in reflow mode yet. Please open the original PDF to view this book.'
-                  .length,
-          attrs: const TextStyleAttrs(),
-        ),
-      ],
-      meta: const BlockMeta(),
-    );
-    return Document(
-      docId: docId,
-      title: file.uri.pathSegments.last,
-      author: 'Unknown',
-      blocks: [placeholder],
-      footnotes: const {},
-      meta: DocumentMeta(
-        source: DocumentSourceFormat.pdf,
-        originalPath: file.path,
-        originalFileName: file.uri.pathSegments.last,
-        importedAt: DateTime.now(),
-        nativePdfFallback: true,
-      ),
-    );
+  Future<Document> importFile(File file, {required String docId}) {
+    throw UnsupportedError(
+        'PDF extraction is not ready yet. Please use native PDF view or provide EPUB/TXT/DOCX.');
   }
 }
 

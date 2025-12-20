@@ -5,7 +5,6 @@ import '../../models/book.dart';
 import '../../models/reading_state.dart';
 import '../../providers.dart';
 import '../reader/reader_screen.dart';
-import '../../utils/app_logger.dart';
 
 class LibraryScreen extends ConsumerStatefulWidget {
   const LibraryScreen({super.key});
@@ -16,7 +15,6 @@ class LibraryScreen extends ConsumerStatefulWidget {
 
 class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   String? _openTileId;
-  final AppLogger _log = const AppLogger('LibraryScreen');
 
   void _setOpenTile(String? id) {
     setState(() {
@@ -84,7 +82,6 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                     book: book,
                     progress: progress,
                     onOpen: () => _openBook(context, ref, book),
-                    onReimport: () => _promptReimport(context, ref, book),
                     onDelete: () => _deleteBook(context, ref, book),
                     isOpen: isOpen,
                     onSlideChanged: (open) =>
@@ -127,50 +124,6 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     }
   }
 
-  Future<void> _promptReimport(
-      BuildContext context, WidgetRef ref, Book book) async {
-    final repo = ref.read(libraryRepositoryProvider);
-    final hasDoc = await repo.documentExists(book.id);
-    if (hasDoc) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Book already migrated.')),
-      );
-      return;
-    }
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Re-import book'),
-        content: const Text(
-            'This book was imported with an old format. Re-import now to enable paragraph/sentence mode and footnotes?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Re-import'),
-          ),
-        ],
-      ),
-    );
-    if (confirm != true) return;
-    final messenger = ScaffoldMessenger.of(context);
-    messenger.showSnackBar(const SnackBar(content: Text('Re-importing...')));
-    try {
-      await ref.read(bookImportServiceProvider).reimport(book);
-      await ref.read(booksProvider.notifier).refresh();
-      await ref.read(readingStatesProvider.notifier).refresh();
-      messenger.showSnackBar(const SnackBar(content: Text('Re-imported')));
-    } catch (e) {
-      _log.error('Reimport failed', context: {'error': e.toString()});
-      messenger.showSnackBar(
-        SnackBar(content: Text('Failed to re-import: $e')),
-      );
-    }
-  }
-
   void _openBook(BuildContext context, WidgetRef ref, Book book) {
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -201,7 +154,6 @@ class _BookTile extends StatefulWidget {
     required this.book,
     required this.progress,
     required this.onOpen,
-    required this.onReimport,
     required this.onDelete,
     required this.isOpen,
     required this.onSlideChanged,
@@ -210,7 +162,6 @@ class _BookTile extends StatefulWidget {
   final Book book;
   final double progress;
   final VoidCallback onOpen;
-  final VoidCallback onReimport;
   final VoidCallback onDelete;
   final bool isOpen;
   final ValueChanged<bool> onSlideChanged;
@@ -285,16 +236,7 @@ class _BookTileState extends State<_BookTile> {
                 child: ListTile(
                   title: Text(widget.book.title),
                   subtitle: Text(widget.book.author),
-                  trailing: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text('${widget.progress.toStringAsFixed(0)}%'),
-                      TextButton(
-                        onPressed: widget.onReimport,
-                        child: const Text('Re-import'),
-                      ),
-                    ],
-                  ),
+                  trailing: Text('${widget.progress.toStringAsFixed(0)}%'),
                 ),
               ),
             ),

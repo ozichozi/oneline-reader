@@ -18,17 +18,18 @@ import '../storage/local_storage.dart';
 import '../../reader/pagination/page_ref.dart';
 import '../../reader/pagination/sentence_segmenter.dart';
 import '../../models/styled_text.dart';
-import '../../utils/app_logger.dart';
 
 class BookImportService {
   BookImportService({
     LibraryRepository? libraryRepository,
-  }) : _repo = libraryRepository ?? LibraryRepository();
+    ImportManager? importManager,
+  })  : _repo = libraryRepository ?? LibraryRepository(),
+        _importManager = importManager ?? ImportManager();
 
   final LibraryRepository _repo;
   final LocalStorage _storage = LocalStorage.instance;
   final _uuid = const Uuid();
-  final AppLogger _log = const AppLogger('BookImportService');
+  final ImportManager _importManager;
 
   Future<Book> importFromDevice() async {
     final result = await FilePicker.platform.pickFiles(
@@ -48,7 +49,7 @@ class BookImportService {
     final ext = picked.extension?.toLowerCase() ?? '';
     final bookId = _uuid.v4();
 
-    _log.info('Starting import', context: {'file': picked.name, 'ext': ext});
+    print('[Import] Starting import for ${picked.name} (${picked.path})');
     // Parse content off the main isolate
     final parsedResult = await compute<_ParseArgs, _ParsedResult>(
       _parseInIsolate,
@@ -61,14 +62,11 @@ class BookImportService {
 
     final document = parsedResult.document;
     final units = parsedResult.units;
-    _log.info('Parsed document', context: {
-      'blocks': document.blocks.length,
-      'footnotes': document.footnotes.length,
-      'units': units.length,
-    });
+    print(
+        '[Import] Parsed document blocks=${document.blocks.length} footnotes=${document.footnotes.length} units=${units.length}');
 
     await _repo.saveDocument(bookId, document);
-    _log.info('Saved canonical document', context: {'bookId': bookId});
+    print('[Import] Saved canonical document for $bookId');
 
     final pages = paginateDocument(
       document: document,
@@ -97,43 +95,6 @@ class BookImportService {
     await _repo.saveStates(states);
 
     return book;
-  }
-
-  /// Re-import an existing stored book file to upgrade to canonical document.
-  Future<Book> reimport(Book existing) async {
-    final file = File(existing.filePath);
-    if (!await file.exists()) {
-      throw Exception('Original file missing at ${existing.filePath}');
-    }
-    _log.info('Reimporting existing book', context: {'bookId': existing.id});
-    final parsed = await compute<_ParseArgs, _ParsedResult>(
-      _parseInIsolate,
-      _ParseArgs(file.path, existing.id),
-    );
-    final document = parsed.document;
-    final units = parsed.units;
-    await _repo.saveDocument(existing.id, document);
-    await _repo.saveContentUnits(existing.id, units);
-
-    final pages = paginateDocument(
-      document: document,
-      segmenter: SentenceSegmenter(),
-      mode: PageMode.sentence,
-    );
-
-    final updatedBook = existing.copyWith(
-      title: document.title,
-      author: document.author ?? existing.author,
-      updatedAt: DateTime.now(),
-      totalUnits: pages.isNotEmpty ? pages.length : units.length,
-    );
-    final books = await _repo.loadBooks();
-    final idx = books.indexWhere((b) => b.id == existing.id);
-    if (idx >= 0) {
-      books[idx] = updatedBook;
-    }
-    await _repo.saveBooks(books);
-    return updatedBook;
   }
 }
 
